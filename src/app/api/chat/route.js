@@ -5,7 +5,7 @@ import { NextResponse } from 'next/server';
 import { getDb } from '../../../lib/db';
 import { SCHEMA_DESCRIPTION } from '../../../lib/schema';
 
-const OPENROUTER_API_KEY = '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';
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const OPENROUTER_BASE = 'https://openrouter.ai/api/v1/chat/completions';
 const MODEL = 'google/gemini-2.0-flash-001';
 
