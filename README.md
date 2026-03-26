@@ -5,6 +5,28 @@
 
 ---
 
+## Screenshots
+
+### Application Overview
+![UI Overview — white theme with KPI bar, graph, and chat panel](screenshots/ui_overview.png)
+
+### O2C Chain Highlighting
+Click any node to highlight its full document chain (SO → Delivery → Billing → Journal Entry → Payment) in amber while dimming unrelated nodes.
+
+![Chain highlighting — clicking a node highlights the full O2C flow](screenshots/chain_highlighting.png)
+
+### Verified Query Results
+
+**Query A — Top Products by Billing Documents**
+![Top products query returning 10 rows with product names and counts](screenshots/query_1_top_products.png)
+
+**Query B — Trace Full O2C Flow of a Billing Document**
+![Trace billing doc 90504248 showing SO→Delivery→Billing→JE→Payment](screenshots/query_2_trace_billing.png)
+
+**Query C — Delivered but Not Billed (Revenue at Risk)**
+![3 sales orders identified as delivered but not billed](screenshots/query_3_orders_not_billed.png)
+
+
 ## Table of Contents
 
 - [Architecture](#architecture)
@@ -274,3 +296,76 @@ Open **http://localhost:3000**
 ---
 
 *Built for the Dodge AI Assignment — SAP O2C Intelligence System*
+
+---
+
+## Verified Query Results
+
+All 3 core assignment queries tested and confirmed working:
+
+### Query A — Top Products by Billing Documents
+Returns top 10 products ranked by number of billing documents, using the correct JOIN through `product_descriptions` (the `products` table has no `productDescription` column).
+
+```sql
+SELECT pd.productDescription, COUNT(DISTINCT bdi.billingDocument) AS billing_doc_count
+FROM billing_document_items bdi
+JOIN product_descriptions pd ON bdi.material = pd.product
+WHERE pd.language = 'EN'
+GROUP BY pd.productDescription
+ORDER BY billing_doc_count DESC LIMIT 10
+```
+
+### Query B — Trace Full O2C Flow of a Billing Document
+Traces a single billing doc back to its Sales Order, through Delivery, to Journal Entry and Payment status.
+
+```sql
+SELECT
+  odi.referenceSdDocument AS salesOrder,
+  bdi.referenceSdDocument AS deliveryDocument,
+  bdh.billingDocument, bdh.totalNetAmount,
+  CASE WHEN pay.accountingDocument IS NOT NULL THEN 'Paid' ELSE 'Unpaid' END AS paymentStatus
+FROM billing_document_headers bdh
+LEFT JOIN billing_document_items bdi ON bdi.billingDocument = bdh.billingDocument
+LEFT JOIN outbound_delivery_items odi ON odi.deliveryDocument = bdi.referenceSdDocument
+LEFT JOIN payments_ar pay ON pay.accountingDocument = bdh.accountingDocument
+WHERE bdh.billingDocument = '90504248'
+GROUP BY bdh.billingDocument
+```
+
+### Query C — Delivered but Not Billed (Broken Flows)
+Identifies 3 sales orders where delivery was completed but no billing document exists — these represent revenue at risk.
+
+```sql
+SELECT DISTINCT odi.referenceSdDocument AS salesOrder,
+  odh.actualGoodsMovementDate AS deliveredOn
+FROM outbound_delivery_items odi
+JOIN outbound_delivery_headers odh ON odh.deliveryDocument = odi.deliveryDocument
+WHERE odi.referenceSdDocument NOT IN (
+  SELECT DISTINCT odi2.referenceSdDocument
+  FROM billing_document_items bdi2
+  JOIN outbound_delivery_items odi2 ON odi2.deliveryDocument = bdi2.referenceSdDocument
+)
+```
+
+---
+
+## Key Technical Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| **SQLite** | Zero-config, embeddable, fast analytical reads, no server needed |
+| **vis-network** | Lightweight, physics-based layout, supports 700+ nodes |
+| **OpenRouter + Gemini fallback** | OpenRouter as primary (higher rate limits); Google Gemini API as automatic fallback if OpenRouter fails |
+| **Two-pass LLM pipeline** | Pass 1 (temp=0.1): NL→SQL with structured JSON output. Pass 2 (temp=0.7): DB results→natural language answer |
+| **SQL examples in system prompt** | 5 pre-verified, runnable SQL patterns included — models pattern-match against working examples far more reliably than schema descriptions alone |
+
+## Critical Schema Discovery
+
+SAP O2C data uses `referenceSdDocument` (not `salesOrder`) as the FK in item tables, chaining each document to the previous one in the flow:
+
+```
+outbound_delivery_items.referenceSdDocument  →  sales_order_headers.salesOrder
+billing_document_items.referenceSdDocument   →  outbound_delivery_headers.deliveryDocument
+```
+
+Discovered via a full DB column audit (`scripts/audit_schema.js`). This single fix unblocked all graph edges and cross-table queries.

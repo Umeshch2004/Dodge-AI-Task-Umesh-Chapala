@@ -1,15 +1,12 @@
 // src/app/api/chat/route.js
-// LLM-powered chat endpoint: NL → SQL → answer
-// Dual-provider fallback: OpenRouter → Google Gemini
+// LLM-powered chat endpoint: NL → SQL → answer (via OpenRouter)
 
 import { NextResponse } from 'next/server';
 import { getDb } from '../../../lib/db';
 import { SCHEMA_DESCRIPTION } from '../../../lib/schema';
 
-const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY || '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';
-const GEMINI_KEY = process.env.GEMINI_API_KEY || 'AIzaSyDtJZgkzPhdBTHrJAOBIge0Um1dLHfCe9s';
+const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY;
 const OPENROUTER_BASE = 'https://openrouter.ai/api/v1/chat/completions';
-const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
 const OR_MODEL = 'google/gemini-2.0-flash-001';
 
 const SYSTEM_PROMPT = `You are an expert SQL analyst for an SAP Order-to-Cash (O2C) business intelligence system.
@@ -94,8 +91,7 @@ GROUP BY bdh.soldToParty ORDER BY totalRevenue DESC LIMIT 10
 RESPONSE FORMAT:
 Return ONLY valid JSON with no markdown, no code fences, no extra text:
 {"sql": "SELECT ...", "explanation": "what this query does", "intent": "user intent"}`;
-
-// Call OpenRouter (primary)
+// Call OpenRouter
 async function callOpenRouter(messages) {
   const res = await fetch(OPENROUTER_BASE, {
     method: 'POST',
@@ -115,48 +111,6 @@ async function callOpenRouter(messages) {
   }
   const data = await res.json();
   return data.choices?.[0]?.message?.content || '';
-}
-
-// Call Google Gemini directly (fallback)
-async function callGemini(messages) {
-  // Convert OpenAI-format messages to Gemini format
-  const systemMsg = messages.find(m => m.role === 'system');
-  const chatMsgs = messages.filter(m => m.role !== 'system');
-
-  const contents = chatMsgs.map(m => ({
-    role: m.role === 'assistant' ? 'model' : 'user',
-    parts: [{ text: m.content }],
-  }));
-
-  const body = {
-    contents,
-    generationConfig: { temperature: 0.1, maxOutputTokens: 2048 },
-    ...(systemMsg ? { systemInstruction: { parts: [{ text: systemMsg.content }] } } : {}),
-  };
-
-  const res = await fetch(`${GEMINI_BASE}?key=${GEMINI_KEY}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const err = await res.text();
-    const error = new Error(`Gemini ${res.status}: ${err.substring(0, 200)}`);
-    error.status = res.status;
-    throw error;
-  }
-  const data = await res.json();
-  return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-}
-
-// Try OpenRouter first, fall back to Gemini automatically
-async function callLLM(messages) {
-  try {
-    return await callOpenRouter(messages);
-  } catch (err) {
-    console.warn(`OpenRouter failed (${err.status || err.message}), falling back to Gemini...`);
-    return await callGemini(messages);
-  }
 }
 
 function isReadOnlySql(sql) {
@@ -189,9 +143,11 @@ export async function POST(request) {
 
     let rawResponse;
     try {
-      rawResponse = await callLLM(sqlMessages);
+      rawResponse = await callOpenRouter(sqlMessages);
     } catch (apiErr) {
-      return NextResponse.json({ answer: '⚠️ Both AI providers are unavailable. Please try again in a moment.', isError: true });
+      if (apiErr.status === 429) return NextResponse.json({ answer: '⏳ Rate limit reached. Please update the API key in Vercel environment variables.', isError: true });
+      if (apiErr.status === 401) return NextResponse.json({ answer: '⚠️ Invalid API key. Please update OPENROUTER_API_KEY in Vercel.', isError: true });
+      throw apiErr;
     }
 
     // Strip markdown fences if present
@@ -257,8 +213,8 @@ export async function POST(request) {
 
     let answer;
     try {
-      answer = await callLLM(answerMessages);
-    } catch {
+      answer = await callOpenRouter(answerMessages);
+    } catch (apiErr) {
       answer = `Query returned ${results.length} row(s).`;
     }
 
